@@ -1,11 +1,12 @@
 import akshare as ak
 import pandas as pd
+import numpy as np
 import requests
 import os
 import sys
 
 # =========================
-# 读取环境变量
+# 参数读取
 # =========================
 FEISHU_WEBHOOK = os.getenv("FEISHU_WEBHOOK")
 ETF_ENV = os.getenv("ETF_POOL")
@@ -18,7 +19,7 @@ if not ETF_ENV:
 ETF_POOL = [code.strip() for code in ETF_ENV.split(",") if code.strip()]
 MOMENTUM_WINDOW = int(WINDOW_ENV.strip()) if WINDOW_ENV else 20
 
-START_DATE = "20180101"
+START_DATE = "20160101"
 INITIAL_CASH = 1000000
 
 print("ETF池:", ETF_POOL)
@@ -40,90 +41,122 @@ def get_etf_data(code):
     return df
 
 data_list = []
-
 for code in ETF_POOL:
-    print(f"下载 {code} 数据...")
+    print(f"下载 {code}")
     df = get_etf_data(code)
     data_list.append(df)
 
 data = pd.concat(data_list, axis=1).dropna()
 
 # =========================
-# 计算动量
+# 计算指标
 # =========================
 momentum = data / data.shift(MOMENTUM_WINDOW) - 1
-momentum = momentum.dropna(how="all")
+ma200 = data["510300"].rolling(200).mean()
 
-# =========================
-# ① 回测模块
-# =========================
+# 每周调仓（周五）
+weekly_dates = data.resample("W-FRI").last().index
+
 cash = INITIAL_CASH
 position = None
 shares = 0
 equity_curve = []
 
-for date in momentum.index:
+for date in data.index:
 
-    today_mom = momentum.loc[date].dropna()
-    today_price = data.loc[date]
+    price_today = data.loc[date]
 
-    if today_mom.empty:
-        equity_curve.append(cash if position is None else shares * today_price[position])
-        continue
+    # 是否为调仓日
+    if date in weekly_dates and date in momentum.index:
 
-    top = today_mom.idxmax()
+        market_bull = price_today["510300"] > ma200.loc[date]
 
+        today_mom = momentum.loc[date].dropna()
+        ranking = today_mom.sort_values(ascending=False)
+
+        top = ranking.index[0]
+        top_mom = ranking.iloc[0]
+
+        new_position = None
+
+        if market_bull:
+            if top_mom > 0:
+                new_position = top
+        else:
+            if "518880" in today_mom.index and today_mom["518880"] > 0:
+                new_position = "518880"
+
+        # 调仓
+        if new_position != position:
+            if position is not None:
+                cash = shares * price_today[position]
+                shares = 0
+            if new_position is not None:
+                shares = cash / price_today[new_position]
+                cash = 0
+            position = new_position
+
+    # 记录资产
     if position is None:
-        shares = cash / today_price[top]
-        position = top
-        cash = 0
+        equity = cash
     else:
-        if top != position:
-            cash = shares * today_price[position]
-            shares = cash / today_price[top]
-            position = top
-            cash = 0
+        equity = shares * price_today[position]
 
-    equity = shares * today_price[position]
     equity_curve.append(equity)
 
-equity_curve = pd.Series(equity_curve, index=momentum.index)
+equity_curve = pd.Series(equity_curve, index=data.index)
 
+# =========================
+# 回测统计
+# =========================
 total_return = equity_curve.iloc[-1] / INITIAL_CASH - 1
 max_drawdown = (equity_curve / equity_curve.cummax() - 1).min()
 annual_return = (1 + total_return) ** (252 / len(equity_curve)) - 1
 
 # =========================
-# ② 今日实盘信号模块
+# 今日信号
 # =========================
-latest_date = momentum.index[-1]
+latest_date = data.index[-1]
 latest_mom = momentum.loc[latest_date].dropna()
+latest_ma200 = ma200.loc[latest_date]
+latest_price_300 = data.loc[latest_date]["510300"]
 
 ranking = latest_mom.sort_values(ascending=False)
-today_top = ranking.index[0]
+top = ranking.index[0]
+top_mom = ranking.iloc[0]
 
-signal_text = ""
-signal_text += "📌 今日动量排名:\n"
+market_bull = latest_price_300 > latest_ma200
 
-for i, (etf, value) in enumerate(ranking.items(), 1):
-    signal_text += f"{i}. {etf} | 动量: {value:.2%}\n"
+today_signal = "空仓"
 
-signal_text += f"\n👉 今日策略建议持仓: {today_top}\n"
+if market_bull:
+    if top_mom > 0:
+        today_signal = top
+else:
+    if "518880" in latest_mom.index and latest_mom["518880"] > 0:
+        today_signal = "518880"
 
 # =========================
-# 输出内容
+# 输出报告
 # =========================
 result_text = f"""
-📊 ETF 动量策略报告
+📊 周频双动量趋势系统报告
 
 【历史回测】
 总收益: {total_return:.2%}
 年化收益: {annual_return:.2%}
 最大回撤: {max_drawdown:.2%}
 
-【今日信号】
-{signal_text}
+【当前市场状态】
+沪深300 > 200MA: {market_bull}
+
+【今日动量排名】
 """
+
+for i, (etf, value) in enumerate(ranking.items(), 1):
+    result_text += f"{i}. {etf} | {value:.2%}\n"
+
+result_text += f"\n👉 今日建议持仓: {today_signal}\n"
 
 print(result_text)
 
@@ -133,10 +166,6 @@ print(result_text)
 if FEISHU_WEBHOOK:
     payload = {
         "msg_type": "text",
-        "content": {
-            "text": result_text
-        }
+        "content": {"text": result_text}
     }
-
-    response = requests.post(FEISHU_WEBHOOK, json=payload)
-    print("飞书推送状态:", response.status_code)
+    requests.post(FEISHU_WEBHOOK, json=payload)
