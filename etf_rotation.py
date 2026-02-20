@@ -15,7 +15,6 @@ if not ETF_ENV:
     print("错误：ETF_POOL 未设置")
     sys.exit(1)
 
-# 去掉换行符和空格
 ETF_POOL = [code.strip() for code in ETF_ENV.split(",") if code.strip()]
 MOMENTUM_WINDOW = int(WINDOW_ENV.strip()) if WINDOW_ENV else 20
 
@@ -26,7 +25,7 @@ print("ETF池:", ETF_POOL)
 print("动量窗口:", MOMENTUM_WINDOW)
 
 # =========================
-# 获取ETF数据函数（增强稳定性）
+# 获取ETF数据
 # =========================
 def get_etf_data(code):
     df = ak.fund_etf_hist_em(
@@ -38,18 +37,8 @@ def get_etf_data(code):
     if df is None or df.empty:
         raise ValueError(f"{code} 数据为空")
 
-    print(f"{code} 原始列名:", df.columns.tolist())
-
-    # 自动识别列名
-    if "日期" in df.columns and "收盘" in df.columns:
-        df = df[["日期", "收盘"]]
-        df.columns = ["date", code]
-    elif "date" in df.columns and "close" in df.columns:
-        df = df[["date", "close"]]
-        df.columns = ["date", code]
-    else:
-        raise ValueError(f"{code} 列名异常: {df.columns.tolist()}")
-
+    df = df[["日期", "收盘"]]
+    df.columns = ["date", code]
     df["date"] = pd.to_datetime(df["date"])
     df.set_index("date", inplace=True)
 
@@ -76,8 +65,15 @@ if data.empty:
 # =========================
 momentum = data / data.shift(MOMENTUM_WINDOW) - 1
 
+# 🔥 关键修复：删除全NaN行
+momentum = momentum.dropna(how="all")
+
+if momentum.empty:
+    print("错误：动量数据为空")
+    sys.exit(1)
+
 # =========================
-# 回测逻辑（单持仓轮动）
+# 回测
 # =========================
 cash = INITIAL_CASH
 position = None
@@ -89,13 +85,20 @@ for date in momentum.index:
     today_mom = momentum.loc[date]
     today_price = data.loc[date]
 
+    # 再次保险：去掉NaN
+    today_mom = today_mom.dropna()
+
+    if today_mom.empty:
+        equity_curve.append(cash if position is None else shares * today_price[position])
+        continue
+
+    top = today_mom.idxmax()
+
     if position is None:
-        top = today_mom.idxmax()
         shares = cash / today_price[top]
         position = top
         cash = 0
     else:
-        top = today_mom.idxmax()
         if top != position:
             cash = shares * today_price[position]
             shares = cash / today_price[top]
@@ -108,7 +111,7 @@ for date in momentum.index:
 equity_curve = pd.Series(equity_curve, index=momentum.index)
 
 # =========================
-# 计算指标
+# 绩效指标
 # =========================
 total_return = equity_curve.iloc[-1] / INITIAL_CASH - 1
 max_drawdown = (equity_curve / equity_curve.cummax() - 1).min()
@@ -130,7 +133,7 @@ ETF池: {', '.join(ETF_POOL)}
 print(result_text)
 
 # =========================
-# 推送飞书
+# 飞书推送
 # =========================
 if FEISHU_WEBHOOK:
     payload = {
