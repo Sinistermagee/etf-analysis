@@ -25,7 +25,7 @@ print("ETF池:", ETF_POOL)
 print("动量窗口:", MOMENTUM_WINDOW)
 
 # =========================
-# 获取ETF数据
+# 获取数据
 # =========================
 def get_etf_data(code):
     df = ak.fund_etf_hist_em(
@@ -33,20 +33,12 @@ def get_etf_data(code):
         start_date=START_DATE,
         adjust="qfq"
     )
-
-    if df is None or df.empty:
-        raise ValueError(f"{code} 数据为空")
-
     df = df[["日期", "收盘"]]
     df.columns = ["date", code]
     df["date"] = pd.to_datetime(df["date"])
     df.set_index("date", inplace=True)
-
     return df
 
-# =========================
-# 下载数据
-# =========================
 data_list = []
 
 for code in ETF_POOL:
@@ -56,24 +48,14 @@ for code in ETF_POOL:
 
 data = pd.concat(data_list, axis=1).dropna()
 
-if data.empty:
-    print("错误：合并后数据为空")
-    sys.exit(1)
-
 # =========================
 # 计算动量
 # =========================
 momentum = data / data.shift(MOMENTUM_WINDOW) - 1
-
-# 🔥 关键修复：删除全NaN行
 momentum = momentum.dropna(how="all")
 
-if momentum.empty:
-    print("错误：动量数据为空")
-    sys.exit(1)
-
 # =========================
-# 回测
+# ① 回测模块
 # =========================
 cash = INITIAL_CASH
 position = None
@@ -82,11 +64,8 @@ equity_curve = []
 
 for date in momentum.index:
 
-    today_mom = momentum.loc[date]
+    today_mom = momentum.loc[date].dropna()
     today_price = data.loc[date]
-
-    # 再次保险：去掉NaN
-    today_mom = today_mom.dropna()
 
     if today_mom.empty:
         equity_curve.append(cash if position is None else shares * today_price[position])
@@ -110,24 +89,40 @@ for date in momentum.index:
 
 equity_curve = pd.Series(equity_curve, index=momentum.index)
 
-# =========================
-# 绩效指标
-# =========================
 total_return = equity_curve.iloc[-1] / INITIAL_CASH - 1
 max_drawdown = (equity_curve / equity_curve.cummax() - 1).min()
 annual_return = (1 + total_return) ** (252 / len(equity_curve)) - 1
 
+# =========================
+# ② 今日实盘信号模块
+# =========================
+latest_date = momentum.index[-1]
+latest_mom = momentum.loc[latest_date].dropna()
+
+ranking = latest_mom.sort_values(ascending=False)
+today_top = ranking.index[0]
+
+signal_text = ""
+signal_text += "📌 今日动量排名:\n"
+
+for i, (etf, value) in enumerate(ranking.items(), 1):
+    signal_text += f"{i}. {etf} | 动量: {value:.2%}\n"
+
+signal_text += f"\n👉 今日策略建议持仓: {today_top}\n"
+
+# =========================
+# 输出内容
+# =========================
 result_text = f"""
-📊 ETF 动量轮动回测结果
+📊 ETF 动量策略报告
 
-ETF池: {', '.join(ETF_POOL)}
-动量窗口: {MOMENTUM_WINDOW} 日
-
+【历史回测】
 总收益: {total_return:.2%}
 年化收益: {annual_return:.2%}
 最大回撤: {max_drawdown:.2%}
 
-当前持仓: {position}
+【今日信号】
+{signal_text}
 """
 
 print(result_text)
@@ -145,5 +140,3 @@ if FEISHU_WEBHOOK:
 
     response = requests.post(FEISHU_WEBHOOK, json=payload)
     print("飞书推送状态:", response.status_code)
-else:
-    print("未设置飞书 Webhook，跳过推送")
