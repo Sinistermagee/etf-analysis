@@ -15,8 +15,9 @@ if not ETF_ENV:
     print("错误：ETF_POOL 未设置")
     sys.exit(1)
 
-ETF_POOL = ETF_ENV.split(",")
-MOMENTUM_WINDOW = int(WINDOW_ENV) if WINDOW_ENV else 20
+# 去掉换行符和空格
+ETF_POOL = [code.strip() for code in ETF_ENV.split(",") if code.strip()]
+MOMENTUM_WINDOW = int(WINDOW_ENV.strip()) if WINDOW_ENV else 20
 
 START_DATE = "20180101"
 INITIAL_CASH = 1000000
@@ -25,7 +26,7 @@ print("ETF池:", ETF_POOL)
 print("动量窗口:", MOMENTUM_WINDOW)
 
 # =========================
-# 获取数据函数
+# 获取ETF数据函数（增强稳定性）
 # =========================
 def get_etf_data(code):
     df = ak.fund_etf_hist_em(
@@ -33,10 +34,25 @@ def get_etf_data(code):
         start_date=START_DATE,
         adjust="qfq"
     )
-    df = df[["日期", "收盘"]]
-    df.columns = ["date", code]
+
+    if df is None or df.empty:
+        raise ValueError(f"{code} 数据为空")
+
+    print(f"{code} 原始列名:", df.columns.tolist())
+
+    # 自动识别列名
+    if "日期" in df.columns and "收盘" in df.columns:
+        df = df[["日期", "收盘"]]
+        df.columns = ["date", code]
+    elif "date" in df.columns and "close" in df.columns:
+        df = df[["date", "close"]]
+        df.columns = ["date", code]
+    else:
+        raise ValueError(f"{code} 列名异常: {df.columns.tolist()}")
+
     df["date"] = pd.to_datetime(df["date"])
     df.set_index("date", inplace=True)
+
     return df
 
 # =========================
@@ -52,7 +68,7 @@ for code in ETF_POOL:
 data = pd.concat(data_list, axis=1).dropna()
 
 if data.empty:
-    print("错误：数据为空")
+    print("错误：合并后数据为空")
     sys.exit(1)
 
 # =========================
