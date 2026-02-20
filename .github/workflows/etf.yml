@@ -1,0 +1,30 @@
+name: ETF Auto Backtest
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 9 * * 1'
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v3
+
+      - name: 安装 Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: 安装依赖
+        run: |
+          pip install akshare pandas requests
+
+      - name: 运行策略
+        env:
+          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+          ETF_POOL: ${{ secrets.ETF_POOL }}
+          MOMENTUM_WINDOW: ${{ secrets.MOMENTUM_WINDOW }}
+        run: python etf_rotation.py
